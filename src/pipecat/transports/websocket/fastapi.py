@@ -33,6 +33,7 @@ from pipecat.frames.frames import (
     OutputTransportMessageFrame,
     OutputTransportMessageUrgentFrame,
     StartFrame,
+    TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.serializers.base_serializer import FrameSerializer
@@ -513,6 +514,13 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
 
             await self._write_frame(frame)
             self._next_send_time = 0
+        elif isinstance(frame, TTSStoppedFrame):
+            # BaseOutputTransport's MediaSender consumes TTSStoppedFrame
+            # internally for bot-speaking-state bookkeeping and never forwards
+            # it to write_transport_frame(), so serializers relying on it to
+            # flush end-of-utterance buffered audio would otherwise never see
+            # it. Forward it through the same write path as InterruptionFrame.
+            await self._write_frame(frame)
 
     async def send_message(
         self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
