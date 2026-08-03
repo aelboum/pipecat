@@ -154,6 +154,12 @@ class DograhTTSService(WebsocketTTSService):
         self._receive_task = None
         self._keepalive_task = None
 
+        # Serializes concurrent _connect() calls (backgrounded from start(),
+        # and the lazy reconnect in run_tts()) so only one ever dials out;
+        # the other just observes the already-open websocket once it gets
+        # the lock.
+        self._connect_lock = asyncio.Lock()
+
         # State management
         self._cumulative_time = 0
         self._accumulated_text = ""
@@ -251,16 +257,24 @@ class DograhTTSService(WebsocketTTSService):
             self._websocket = None
 
     async def _connect(self):
-        """Connect to the Dograh TTS service with full initialization."""
-        await super()._connect()
+        """Connect to the Dograh TTS service with full initialization.
 
-        await self._connect_websocket()
+        Locked so a backgrounded connect (from start()) and a lazy reconnect
+        (from run_tts()) can never both dial out at once - the second caller
+        just finds the websocket already open once it acquires the lock.
+        """
+        async with self._connect_lock:
+            await super()._connect()
 
-        if self._websocket and not self._receive_task:
-            self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
+            await self._connect_websocket()
 
-        if self._websocket and not self._keepalive_task:
-            self._keepalive_task = self.create_task(self._keepalive_task_handler())
+            if self._websocket and not self._receive_task:
+                self._receive_task = self.create_task(
+                    self._receive_task_handler(self._report_error)
+                )
+
+            if self._websocket and not self._keepalive_task:
+                self._keepalive_task = self.create_task(self._keepalive_task_handler())
 
     async def _disconnect(self):
         """Disconnect from Dograh TTS service and clean up tasks."""
@@ -586,10 +600,16 @@ class DograhTTSService(WebsocketTTSService):
     async def start(self, frame: StartFrame):
         """Start the TTS service.
 
+        Connects in the background rather than blocking StartFrame here:
+        TTS isn't actually needed until the LLM produces text to synthesize,
+        which is always well after this point, so there's no reason to hold
+        up pipeline startup on this round trip. run_tts() lazily connects
+        (and, via the lock, waits for this task) if it ever runs first.
+
         Args:
             frame: The start frame containing initialization data.
         """
         await super().start(frame)
         self._start_metadata = frame.metadata
         self._reset_state()
-        await self._connect()
+        self.create_task(self._connect())
